@@ -27,15 +27,31 @@ st.set_page_config(
 
 BASE_DIR = Path(__file__).resolve().parent
 
-REPO_MODEL = BASE_DIR / "model" / "random_forest_magepanda.pkl"
-MODEL_PATH = REPO_MODEL
+LOCAL_MODEL = Path(
+    r"C:\OPI AI\model\random_forest_magepanda.pkl"
+)
+
+REPO_MODEL = BASE_DIR / "random_forest_magepanda.pkl"
+
+if LOCAL_MODEL.exists():
+    MODEL_PATH = LOCAL_MODEL
+else:
+    MODEL_PATH = REPO_MODEL
 
 # =========================================================
 # PATH DATASET
 # =========================================================
 
-REPO_DATA = BASE_DIR / "data" / "raw" / "Magepanda_synthetic_dataset_corrected.csv"
-DATA_PATH = REPO_DATA
+LOCAL_DATA = Path(
+    r"C:\OPI AI\data\raw\Magepanda_synthetic_dataset_corrected.csv"
+)
+
+REPO_DATA = BASE_DIR / "Magepanda_synthetic_dataset_corrected.csv"
+
+if LOCAL_DATA.exists():
+    DATA_PATH = LOCAL_DATA
+else:
+    DATA_PATH = REPO_DATA
 
 @st.cache_data
 def load_project_data():
@@ -476,100 +492,129 @@ def load_magepanda_coastline():
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def build_coastal_display_coordinates(coastline_paths, n_points, seed=42):
-    """Membuat koordinat DISPLAY sintetis yang mengikuti garis pantai.
+    """Membuat koordinat DISPLAY sintetis yang mengikuti geometri garis pantai.
 
-    Koordinat asli dataset tidak disentuh. Fungsi ini hanya menghasilkan
-    latitude/longitude khusus untuk visualisasi peta, karena dataset proyek
-    bersifat sintetis dan koordinat aslinya membentuk garis diagonal.
+    Koordinat asli dataset tidak diubah. Fungsi ini hanya membuat posisi
+    visualisasi baru berdasarkan geometri coastline dari OpenStreetMap.
+    Versi ini sengaja tidak memakai ambang panjang 500 m per way, karena
+    coastline OSM sering tersusun dari banyak segmen pendek.
     """
     if not coastline_paths or n_points <= 0:
         return None
 
-    # Konversi lokal derajat -> meter di sekitar Magepanda.
     ref_lat = MAGEPANDA_LAT
     lat_scale = 111320.0
     lon_scale = 111320.0 * np.cos(np.deg2rad(ref_lat))
 
-    path_xy = []
-    path_lengths = []
+    # Ubah semua way coastline menjadi koordinat lokal (meter).
+    paths = []
+    lengths = []
     for item in coastline_paths:
-        path = item.get("path", [])
-        if len(path) < 2:
+        raw_path = item.get("path", [])
+        if len(raw_path) < 2:
             continue
-        xy = []
-        for lon, lat in path:
-            x = (float(lon) - MAGEPANDA_LON) * lon_scale
-            y = (float(lat) - ref_lat) * lat_scale
-            xy.append((x, y))
-        xy = np.asarray(xy, dtype=float)
-        seg = np.sqrt(np.sum(np.diff(xy, axis=0) ** 2, axis=1))
-        length = float(seg.sum())
-        if length >= 500:
-            path_xy.append(xy)
-            path_lengths.append(length)
 
-    if not path_xy:
+        xy = np.asarray(
+            [
+                [
+                    (float(lon) - MAGEPANDA_LON) * lon_scale,
+                    (float(lat) - ref_lat) * lat_scale,
+                ]
+                for lon, lat in raw_path
+            ],
+            dtype=float,
+        )
+
+        # Buang titik berulang/segmen nol panjang.
+        if len(xy) >= 2:
+            keep = np.r_[True, np.any(np.diff(xy, axis=0) != 0, axis=1)]
+            xy = xy[keep]
+
+        if len(xy) < 2:
+            continue
+
+        seg = np.linalg.norm(np.diff(xy, axis=0), axis=1)
+        length = float(seg.sum())
+        if length > 20:  # tetap menerima way pendek yang merupakan bagian coastline
+            paths.append(xy)
+            lengths.append(length)
+
+    if not paths:
         return None
 
-    # Ambil jumlah titik per segmen berdasarkan panjang garis pantai.
-    total_len = float(sum(path_lengths))
-    raw_counts = [n_points * L / total_len for L in path_lengths]
-    counts = [max(2, int(round(v))) for v in raw_counts]
+    # Jika OSM mengembalikan banyak potongan sangat kecil, tetap gunakan
+    # geometri tersebut, tetapi alokasikan titik berdasarkan panjang garis.
+    total_length = float(sum(lengths))
+    if total_length <= 0:
+        return None
 
-    # Koreksi agar total persis sama dengan jumlah titik.
-    while sum(counts) > n_points:
-        j = int(np.argmax(counts))
-        if counts[j] <= 2:
-            break
-        counts[j] -= 1
-    while sum(counts) < n_points:
-        j = int(np.argmax(path_lengths))
-        counts[j] += 1
+    raw_counts = np.asarray(lengths, dtype=float) / total_length * n_points
+    counts = np.floor(raw_counts).astype(int)
+    counts = np.maximum(counts, 0)
+
+    # Pastikan segmen yang mendapat porsi kecil tetap memperoleh titik.
+    fractional_order = np.argsort(-(raw_counts - counts))
+    remaining = n_points - int(counts.sum())
+    for idx in fractional_order[:max(0, remaining)]:
+        counts[idx] += 1
+
+    # Jika rounding masih menyisakan selisih, distribusikan ke segmen terpanjang.
+    while counts.sum() < n_points:
+        counts[int(np.argmax(lengths))] += 1
+    while counts.sum() > n_points:
+        candidates = np.where(counts > 0)[0]
+        if len(candidates) == 0:
+            return None
+        idx = candidates[int(np.argmax(counts[candidates]))]
+        counts[idx] -= 1
 
     rng = np.random.default_rng(seed)
     result = []
 
-    for path_idx, (xy, k) in enumerate(zip(path_xy, counts)):
-        if len(xy) < 2 or k <= 0:
+    for path_idx, (xy, k) in enumerate(zip(paths, counts)):
+        if k <= 0 or len(xy) < 2:
             continue
 
-        seg = np.sqrt(np.sum(np.diff(xy, axis=0) ** 2, axis=1))
-        cumulative = np.concatenate([[0.0], np.cumsum(seg)])
+        seg = np.linalg.norm(np.diff(xy, axis=0), axis=1)
+        cumulative = np.r_[0.0, np.cumsum(seg)]
         total = float(cumulative[-1])
         if total <= 0:
             continue
 
-        # Titik menyebar sepanjang garis, bukan menumpuk di satu lokasi.
-        targets = np.linspace(0, total, k)
+        # Hindari titik yang semuanya persis berada pada ujung-ujung way.
+        if k == 1:
+            targets = np.array([total * 0.5])
+        else:
+            spacing = total / k
+            targets = (np.arange(k) + 0.5) * spacing
+
         for local_idx, target in enumerate(targets):
             idx = int(np.searchsorted(cumulative, target, side="right") - 1)
             idx = max(0, min(idx, len(xy) - 2))
+
             denom = cumulative[idx + 1] - cumulative[idx]
             frac = 0.0 if denom <= 0 else (target - cumulative[idx]) / denom
             p = xy[idx] + frac * (xy[idx + 1] - xy[idx])
 
-            # Tangent lokal.
+            # Tangent lokal mengikuti bentuk coastline.
             if idx == 0:
                 tangent = xy[1] - xy[0]
             elif idx >= len(xy) - 2:
                 tangent = xy[-1] - xy[-2]
             else:
                 tangent = xy[idx + 1] - xy[idx - 1]
+
             norm = float(np.linalg.norm(tangent))
             if norm <= 0:
                 continue
             tangent = tangent / norm
 
-            # Dua normal; pilih sisi yang mengarah ke titik referensi daratan.
-            normal_a = np.array([-tangent[1], tangent[0]])
-            to_land = np.array([0.0, 0.0]) - p
-            if np.dot(normal_a, to_land) < 0:
-                normal_a = -normal_a
-
-            # Jarak masuk ke daratan + jitter kecil sepanjang garis pantai.
-            inward_m = 120.0 + float((local_idx * 67 + path_idx * 31) % 300)
-            along_jitter = float(rng.uniform(-45, 45))
-            display_xy = p + normal_a * inward_m + tangent * along_jitter
+            # Offset sangat kecil dari garis pantai agar marker mudah dilihat.
+            normal = np.array([-tangent[1], tangent[0]])
+            side = -1.0 if (local_idx + path_idx) % 2 else 1.0
+            offset_m = float(rng.uniform(15, 70)) * side
+            along_jitter = float(rng.uniform(-20, 20))
+            display_xy = p + normal * offset_m + tangent * along_jitter
 
             display_lon = MAGEPANDA_LON + display_xy[0] / lon_scale
             display_lat = ref_lat + display_xy[1] / lat_scale
@@ -577,6 +622,7 @@ def build_coastal_display_coordinates(coastline_paths, n_points, seed=42):
 
     if len(result) < n_points:
         return None
+
     return result[:n_points]
 
 
