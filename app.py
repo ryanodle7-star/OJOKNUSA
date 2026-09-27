@@ -444,13 +444,36 @@ st.markdown(
 # REFERENSI GARIS PANTAI AKTUAL
 # =========================================================
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def load_magepanda_coastline():
-    """Mengambil geometri garis pantai OpenStreetMap di sekitar Magepanda.
+COASTLINE_GEOJSON = BASE_DIR / "data" / "geo" / "GarisPantai_Magepanda_2024.geojson"
 
-    Geometri ini hanya digunakan sebagai referensi kartografis.
-    Titik prediksi tetap berasal dari dataset proyek dan tidak digeser.
+
+@st.cache_data(show_spinner=False)
+def load_magepanda_coastline():
+    """Utamakan garis pantai Magepanda 2024 dari file lokal.
+    Overpass hanya menjadi fallback jika GeoJSON lokal tidak tersedia.
     """
+    if COASTLINE_GEOJSON.exists():
+        try:
+            data = json.loads(COASTLINE_GEOJSON.read_text(encoding="utf-8"))
+            paths = []
+            for feature in data.get("features", []):
+                geom = feature.get("geometry") or {}
+                gtype = geom.get("type")
+                coords = geom.get("coordinates", [])
+                if gtype == "LineString" and len(coords) >= 2:
+                    paths.append({"path": [[float(x), float(y)] for x, y in coords]})
+                elif gtype == "MultiLineString":
+                    for line in coords:
+                        if len(line) >= 2:
+                            paths.append({"path": [[float(x), float(y)] for x, y in line]})
+            if paths:
+                return paths, "GarisPantai_Magepanda_2024.geojson (lokal)"
+            local_error = "GeoJSON lokal tidak berisi geometri garis yang valid."
+        except Exception as exc:
+            local_error = f"GeoJSON lokal gagal dibaca: {exc}"
+    else:
+        local_error = "GeoJSON garis pantai lokal belum tersedia."
+
     query = (
         '[out:json][timeout:25];'
         'way["natural"="coastline"]'
@@ -461,21 +484,17 @@ def load_magepanda_coastline():
         "https://overpass-api.de/api/interpreter",
         "https://overpass.kumi.systems/api/interpreter",
     ]
-
     last_error = None
     for endpoint in endpoints:
         try:
             payload = urllib.parse.urlencode({"data": query}).encode("utf-8")
             request = urllib.request.Request(
-                endpoint,
-                data=payload,
-                headers={"User-Agent": "OJOKNUSA-AI/1.0"},
-                method="POST",
+                endpoint, data=payload,
+                headers={"User-Agent": "OJOKNUSA-AI/1.0"}, method="POST"
             )
             with urllib.request.urlopen(request, timeout=30) as response:
                 raw = response.read().decode("utf-8")
             data = json.loads(raw)
-
             paths = []
             for element in data.get("elements", []):
                 geometry = element.get("geometry", [])
@@ -483,11 +502,11 @@ def load_magepanda_coastline():
                 if len(path) >= 2:
                     paths.append({"path": path})
             if paths:
-                return paths, "OpenStreetMap / Overpass API"
+                return paths, "OpenStreetMap / Overpass API (fallback)"
         except Exception as exc:
             last_error = str(exc)
 
-    return [], last_error or "Sumber garis pantai tidak dapat diakses."
+    return [], last_error or local_error
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -1743,7 +1762,7 @@ elif st.session_state.menu == "Peta Pesisir":
                 # ---------------------------------------------------------
                 # PETA BERBASIS GEOMETRI GARIS PANTAI - V4
                 # ---------------------------------------------------------
-                # Garis pantai referensi diambil dari OpenStreetMap.
+                # Garis pantai referensi diprioritaskan dari GeoJSON lokal Magepanda 2024.
                 # Koordinat asli dataset tetap disimpan utuh.
                 # Untuk VISUALISASI saja, titik sintetis dibuat mengikuti garis
                 # pantai sehingga distribusinya tidak lagi membentuk diagonal.
@@ -1867,13 +1886,13 @@ elif st.session_state.menu == "Peta Pesisir":
 
                 if coastline_paths and display_coords is not None:
                     st.success(
-                        "🗺️ V4: garis pantai referensi berhasil ditampilkan dari "
-                        "OpenStreetMap, dan titik prediksi sintetis disebarkan mengikuti "
+                        "🗺️ Garis pantai Magepanda 2024 berhasil dimuat dari file lokal, dan "
+                        "titik prediksi sintetis disebarkan mengikuti "
                         "garis pantai khusus untuk visualisasi. Koordinat asli dataset tetap tersimpan."
                     )
                 else:
                     st.warning(
-                        "⚠️ Garis pantai referensi tidak dapat dimuat dari layanan peta saat ini. "
+                        "⚠️ Garis pantai referensi tidak dapat dimuat. "
                         f"Peta tetap menampilkan titik dataset. Detail: {coastline_source}"
                     )
 
@@ -1882,15 +1901,15 @@ elif st.session_state.menu == "Peta Pesisir":
                     <div class="info-box">
                     <b>Legenda:</b><br>
                     🔴 Abrasi &nbsp;&nbsp; 🟡 Stabil &nbsp;&nbsp; 🟢 Akresi &nbsp;&nbsp; ◉ Referensi Magepanda<br>
-                    <small>Garis biru-toska = garis pantai referensi OpenStreetMap. Ukuran titik = tingkat risiko prototype.</small><br>
-                    <small><b>Penting:</b> garis pantai referensi bukan hasil survei OJOKNUSA. Pada V4, koordinat yang mengikuti garis pantai adalah <b>koordinat visualisasi</b> untuk dataset sintetis; kolom latitude/longitude asli tidak diubah.</small>
+                    <small>Garis biru-toska = garis pantai referensi Magepanda 2024. Ukuran titik = tingkat risiko prototype.</small><br>
+                    <small><b>Penting:</b> garis pantai referensi bukan hasil survei OJOKNUSA. Pada visualisasi ini, koordinat yang mengikuti garis pantai adalah <b>koordinat visualisasi</b> untuk dataset sintetis; kolom latitude/longitude asli tidak diubah.</small>
                     </div>
                     """,
                     unsafe_allow_html=True
                 )
 
                 st.caption(
-                    "Sumber geometri garis pantai: OpenStreetMap contributors melalui Overpass API. "
+                    "Sumber geometri garis pantai: GarisPantai_Magepanda_2024.gpkg (dikonversi ke GeoJSON lokal). "
                     "Data prediksi OJOKNUSA tetap bersifat sintetis/purwarupa."
                 )
 
