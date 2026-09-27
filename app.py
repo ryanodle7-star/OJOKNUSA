@@ -449,66 +449,83 @@ COASTLINE_GEOJSON = BASE_DIR / "data" / "geo" / "GarisPantai_Magepanda_2024.geoj
 
 @st.cache_data(show_spinner=False)
 def load_magepanda_coastline():
-    """Utamakan garis pantai Magepanda 2024 dari file lokal.
-    Overpass hanya menjadi fallback jika GeoJSON lokal tidak tersedia.
+    """Memuat garis pantai Magepanda 2024 dari GeoJSON lokal.
+
+    GeoJSON lokal menjadi sumber utama dan satu-satunya sumber.
+    Tidak menggunakan Overpass agar aplikasi tidak bergantung
+    pada koneksi layanan eksternal.
     """
-    if COASTLINE_GEOJSON.exists():
-        try:
-            data = json.loads(COASTLINE_GEOJSON.read_text(encoding="utf-8"))
-            paths = []
-            for feature in data.get("features", []):
-                geom = feature.get("geometry") or {}
-                gtype = geom.get("type")
-                coords = geom.get("coordinates", [])
-                if gtype == "LineString" and len(coords) >= 2:
-                    paths.append({"path": [[float(x), float(y)] for x, y in coords]})
-                elif gtype == "MultiLineString":
-                    for line in coords:
-                        if len(line) >= 2:
-                            paths.append({"path": [[float(x), float(y)] for x, y in line]})
-            if paths:
-                return paths, "GarisPantai_Magepanda_2024.geojson (lokal)"
-            local_error = "GeoJSON lokal tidak berisi geometri garis yang valid."
-        except Exception as exc:
-            local_error = f"GeoJSON lokal gagal dibaca: {exc}"
-    else:
-        local_error = "GeoJSON garis pantai lokal belum tersedia."
 
-    query = (
-        '[out:json][timeout:25];'
-        'way["natural"="coastline"]'
-        '(around:12000,-8.5487,122.0486);'
-        'out geom;'
-    )
-    endpoints = [
-        "https://overpass-api.de/api/interpreter",
-        "https://overpass.kumi.systems/api/interpreter",
+    candidates = [
+        BASE_DIR / "data" / "geo" / "GarisPantai_Magepanda_2024.geojson",
+        BASE_DIR / "GarisPantai_Magepanda_2024.geojson",
     ]
-    last_error = None
-    for endpoint in endpoints:
+
+    errors = []
+
+    for geojson_path in candidates:
+        if not geojson_path.exists():
+            continue
+
         try:
-            payload = urllib.parse.urlencode({"data": query}).encode("utf-8")
-            request = urllib.request.Request(
-                endpoint, data=payload,
-                headers={"User-Agent": "OJOKNUSA-AI/1.0"}, method="POST"
+            data = json.loads(
+                geojson_path.read_text(encoding="utf-8")
             )
-            with urllib.request.urlopen(request, timeout=30) as response:
-                raw = response.read().decode("utf-8")
-            data = json.loads(raw)
+
             paths = []
-            for element in data.get("elements", []):
-                geometry = element.get("geometry", [])
-                path = [[point["lon"], point["lat"]] for point in geometry]
-                if len(path) >= 2:
-                    paths.append({"path": path})
+
+            for feature in data.get("features", []):
+                geometry = feature.get("geometry") or {}
+                geometry_type = geometry.get("type")
+                coordinates = geometry.get("coordinates", [])
+
+                if geometry_type == "LineString":
+                    if len(coordinates) >= 2:
+                        path = [
+                            [float(coord[0]), float(coord[1])]
+                            for coord in coordinates
+                            if len(coord) >= 2
+                        ]
+
+                        if len(path) >= 2:
+                            paths.append({"path": path})
+
+                elif geometry_type == "MultiLineString":
+                    for line in coordinates:
+                        if len(line) < 2:
+                            continue
+
+                        path = [
+                            [float(coord[0]), float(coord[1])]
+                            for coord in line
+                            if len(coord) >= 2
+                        ]
+
+                        if len(path) >= 2:
+                            paths.append({"path": path})
+
             if paths:
-                return paths, "OpenStreetMap / Overpass API (fallback)"
+                return (
+                    paths,
+                    f"{geojson_path.name} (lokal)"
+                )
+
+            errors.append(
+                f"{geojson_path.name}: tidak ditemukan "
+                "geometri LineString/MultiLineString yang valid"
+            )
+
         except Exception as exc:
-            last_error = str(exc)
+            errors.append(
+                f"{geojson_path.name}: {exc}"
+            )
 
-    return [], last_error or local_error
+    error_detail = " | ".join(errors)
 
-
+    return [], (
+        "GeoJSON garis pantai lokal gagal dimuat. "
+        + error_detail
+    )
 @st.cache_data(ttl=86400, show_spinner=False)
 def build_coastal_display_coordinates(coastline_paths, n_points, seed=42):
     """Membuat koordinat DISPLAY sintetis yang mengikuti geometri garis pantai.
