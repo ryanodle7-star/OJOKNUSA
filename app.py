@@ -31,7 +31,7 @@ LOCAL_MODEL = Path(
     r"C:\OPI AI\model\random_forest_magepanda.pkl"
 )
 
-REPO_MODEL = BASE_DIR / "random_forest_magepanda.pkl"
+REPO_MODEL = BASE_DIR / "model" / "random_forest_magepanda.pkl"
 
 if LOCAL_MODEL.exists():
     MODEL_PATH = LOCAL_MODEL
@@ -46,7 +46,7 @@ LOCAL_DATA = Path(
     r"C:\OPI AI\data\raw\Magepanda_synthetic_dataset_corrected.csv"
 )
 
-REPO_DATA = BASE_DIR / "Magepanda_synthetic_dataset_corrected.csv"
+REPO_DATA = BASE_DIR / "data" / "raw" / "Magepanda_synthetic_dataset_corrected.csv"
 
 if LOCAL_DATA.exists():
     DATA_PATH = LOCAL_DATA
